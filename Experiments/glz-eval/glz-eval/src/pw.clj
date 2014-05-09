@@ -21,14 +21,15 @@
 
 ;; dissimilarities
 
-(defn dissimilarities-trial [trial]
+(defn dissimilarities-trial [trial metfn metname]
 	;return ratings and error
 	(let [r (:reference trial)
 				traces-and-ratings (:ratings trial)
 				doms (:domains trial)]
 		(doall (map (fn [[trace rating]]
-									(let [d (min 1 (distance r trace doms))]
-										{:metric d :human rating :error (- d rating)
+									(let [d (min 1 (metfn r trace doms))]
+										{:metric metname
+										 :prediction d :human rating :error (- d rating)
 										 :ref (standardize-id (:id r)) :trace (standardize-id (:id trace))}))
 								traces-and-ratings))))
 
@@ -43,41 +44,53 @@
 														:longest-trace-length (apply max (map #(count (:inputs %)) (conj (map first ratings) r)))}))
 												(dissimilarity)))
 
-(defn analyze-dissimilarity []
-	(let [trials (doall (do-trials dissimilarities-trial d-measure))
+(defn analyze-dissimilarity [metfn metname]
+	(let [trials (doall (do-trials #(dissimilarities-trial % metfn metname) d-measure))
 				rms-err (rms-error trials)]
 		(println "err" rms-err)
-		{:metric :glz
+		{:metric metname
 		 :rms-err rms-err
 		 :ms-err (ms-error trials)
 		 :mean-err (mean-error trials)
 		 :mean-abs-err (mean-abs-error trials)
 		 :trials trials}))
 
-(defn analyze-dissimilarity-find-w []
+(defn analyze-dissimilarity-find-w [metfn metname]
 	(let [longest-trace-length (apply max (map :longest-trace-length d-measure))
 				ws (doall
 						(map (fn [w]
 									 (println "dissimilarity try w =" w)
-									 (assoc (with-warp-window w (analyze-dissimilarity)) :w w))
+									 (assoc (with-warp-window w (analyze-dissimilarity metfn metname)) :w w))
 								 (range 1 (inc longest-trace-length))))]
 		(println "done with parameter exploration")
 		(apply min-key :rms-err ws)))
 
+;; n-gram-specific hack for parameter search
+(defn analyze-dissimilarity-find-n [metfn metname]
+	(let [ns (doall
+						(map (fn [n]
+									 (println "dissimilarity try n =" n)
+									 (assoc (analyze-dissimilarity (partial metfn n) metname) :n n))
+								 (range 1 10)))]
+		(println "done with parameter exploration")
+		(apply min-key :rms-err ws)))
+
+
 ;; outlierness
 
-(defn outlierness-trial [t k]
+(defn outlierness-trial [t k metfn metname]
 	(let [ratings (:ratings t)
 				traces (keys ratings)
 				domains (:domains t)
-				clustering (k-medoids k traces (fn [a b] (min 1 (distance a b domains))))]
+				clustering (k-medoids k traces (fn [a b] (min 1 (metfn a b domains))))]
 		(doall (mapcat (fn [c]
 										 (let [_ c
 													 samples (:samples c)]
 											 (doall (map (fn [s]
 																		 (let [rating (get ratings (:sample s))
 																					 d (:distance s)]
-																			 {:metric d :human rating :error (- d rating)
+																			 {:metric metname
+																				:prediction d :human rating :error (- d rating)
 																				:trace (standardize-id (:id (:sample s)))
 																				:medoid (standardize-id (:id (:medoid c)))}))
 																	 samples))))
@@ -92,42 +105,43 @@
 															:longest-trace-length (apply max (map #(count (:inputs %)) (map first ratings)))}))
 												 (outlierness)))
 
-(defn analyze-outlierness [k]
-	(let [trials (do-trials #(outlierness-trial % k) os-measure)
+(defn analyze-outlierness [k metfn metname]
+	(let [trials (do-trials #(outlierness-trial % k metfn metname) os-measure)
 				rms-err (rms-error trials)]
 		(println "err" rms-err)
 		{:k k
-		 :metric :glz
+		 :metric metname
 		 :rms-err rms-err
 		 :ms-err (ms-error trials)
 		 :mean-err (mean-error trials)
 		 :mean-abs-err (mean-abs-error trials)
 		 :trials trials}))
 
-(defn analyze-outlierness-find-k []
+(defn analyze-outlierness-find-k [metfn metname]
 	(let [largest-trace-count (apply max (map #(count (:ratings %)) os-measure))
 				param-sets
 				(doall (map (fn [k]
 											(println "outlierness try k =" k)
-											(analyze-outlierness k))
+											(analyze-outlierness k metfn metname))
 										(range 1 (max 3 (int (/ largest-trace-count 5))))))]
 		(println "done with parameter exploration")
 		(apply min-key :rms-err param-sets)))
 
 ;; uniqueness
 
-(defn uniqueness-trial [t k]
+(defn uniqueness-trial [t k metfn metname]
 	(let [rating (:rating t)
 				traces (:traces t)
 				domains (:domains t)
-				clustering (k-medoids k traces (fn [a b] (min 1 (distance a b domains))))
+				clustering (k-medoids k traces (fn [a b] (min 1 (metfn a b domains))))
 				cluster-weights (:weight clustering)
 				sample-count (count traces)
 				d (/ cluster-weights sample-count)]
 		;; overall uniqueness is average-distance-of-each-trace-from-its-medoid.
 		;; the sum of such distances is already the clustering's weight, so we can just
 		;; divide it by the number of samples.
-		{:metric d :human rating :error (- d rating)
+		{:metric metname
+		 :prediction d :human rating :error (- d rating)
 		 :traces (map #(standardize-id (:id %)) traces)
 		 :medoids (map #(:id (:medoid %)) (:clusters clustering))}))
 
@@ -139,35 +153,55 @@
 															:longest-trace-length (apply max (map #(count (:inputs %)) (:traces traces)))}))
 												 (uniqueness)))
 
-(defn analyze-uniqueness [k]
-	(let [trials (do-trials #(uniqueness-trial % k) us-measure)
+(defn analyze-uniqueness [k metfn metname]
+	(let [trials (do-trials #(uniqueness-trial % k metfn metname) us-measure)
 				rms-err (rms-error trials)]
 		{:k k
-		 :metric :glz
+		 :metric metname
 		 :rms-err rms-err
 		 :ms-err (ms-error trials)
 		 :mean-err (mean-error trials)
 		 :mean-abs-err (mean-abs-error trials)
 		 :trials trials}))
 
-(defn analyze-uniqueness-find-k []
+(defn analyze-uniqueness-find-k [metfn metname]
 	(let [longest-trace-length (apply max (map :longest-trace-length us-measure))
 				largest-trace-count (apply max (map #(count (:traces %)) us-measure))
 				param-sets
 				(doall (mapcat (fn [k]
 												 (println "uniqueness try k =" k)
-												 (analyze-uniqueness k))
+												 (analyze-uniqueness k metfn metname))
 											 (range 1 (max 3 (int (/ largest-trace-count 5))))))]
 		(println "done with parameter exploration")
 		(apply min-key :rms-err param-sets)))
 
+; NEXT:
+#_(defn ngram-distance [n a b]
+	; count n-grams in a, in b
+	; take manhattan distance and normalize
+	)
+
 ;; overall
 
-(let [ad (analyze-dissimilarity-find-w)
+;;; glz results
+(let [ad (analyze-dissimilarity-find-w distance :glz)
 			w (:w ad)
-			ao (with-warp-window w (analyze-outlierness-find-k))
+			ao (with-warp-window w (analyze-outlierness-find-k distance :glz))
 			k (:k ao)
-			au (with-warp-window w (analyze-uniqueness k))]
+			au (with-warp-window w (analyze-uniqueness k distance :glz))]
+	[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+		:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+		:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+		:mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+	 {:ad ad :ao ao :au au}])
+
+; NEXT:
+;;; n-gram results
+#_(let [ad (analyze-dissimilarity-find-n (fn [n a b _doms] (ngram-distance n a b)) :n-gram)
+			n (:n ad)
+			ao (analyze-outlierness-find-k (fn [a b _doms] (ngram-distance n a b)) :n-gram)
+			k (:k ao)
+			au (analyze-uniqueness k (fn [a b _doms] (ngram-distance n a b)) :n-gram)]
 	[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
 		:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
 		:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
