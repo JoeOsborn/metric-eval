@@ -23,4 +23,5 @@
 														:username ""
 														:passphrase ""}}
   :plugins []
-  :source-paths ["src"])
+  :source-paths ["src"]
+	:java-source-paths ["java-src"])

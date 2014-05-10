@@ -1,12 +1,16 @@
 (ns pw
-	(:require [clojure.string :refer [split join]]
+	(:require [clojure.java.io :refer [file reader]]
+						[clojure.string :refer [split join]]
 						[clojure.math.numeric-tower :refer [abs ceil floor sqrt]]
 						[clojure.core.memoize :as mem]
 						[gamalyzer.cmp.tt.cced :refer [with-warp-window distance distances]]
 						[gamalyzer.data.input :refer [make-traces make-domains expand-domain**]]
+						[clojure-csv.core :refer [parse-csv]]
 						[k-medoid :refer [k-medoids]]
 						[error :refer [mean-error mean-abs-error ms-error rms-error]]
-						[pw-read :refer [dissimilarity uniqueness outlierness]]))
+						[pw-read :refer [dissimilarity uniqueness outlierness]])
+	(:import [edu.ucsc.eis Baseline])
+	)
 
 (defn standardize-id [trace-id]
 	(if (= (subs trace-id 0 5) "game-")
@@ -73,7 +77,7 @@
 									 (assoc (analyze-dissimilarity (partial metfn n) metname) :n n))
 								 (range 1 10)))]
 		(println "done with parameter exploration")
-		(apply min-key :rms-err ws)))
+		(apply min-key :rms-err ns)))
 
 
 ;; outlierness
@@ -175,16 +179,60 @@
 		(println "done with parameter exploration")
 		(apply min-key :rms-err param-sets)))
 
-; NEXT:
-#_(defn ngram-distance [n a b]
-	; count n-grams in a, in b
-	; take manhattan distance and normalize
-	)
+(defn game-names [trace] (map #(str (second (second (first (:vals %)))))
+															(:inputs trace)))
+
+(defn int-frequencies [l]
+	(into {} (map (fn [[k v]] [k (int v)])
+								(frequencies l))))
+
+(def ngram-count
+	(mem/memo
+	 (fn [n t] (int-frequencies (map #(join "__" %)
+																	 (partition n 1 (game-names t)))))))
+
+(defn ngram-distance [n a b] (Baseline/ngramDistance (ngram-count n a) (ngram-count n b)))
+
+(defn intent-names [trace] (map #(str
+																	(first (first (:vals %))) "_"
+																	(second (second (first (:vals %)))) "_"
+																	(second (:vals %)))
+																(:inputs trace)))
+
+(def intent-count
+	(mem/memo
+	 (fn [t] (int-frequencies (intent-names t)))))
+
+(defn intent-distance [a b]
+	(Baseline/intentCosineDissimilarity (intent-count a) (intent-count b)))
+
+(defn find-file [root nom]
+	(first (filter #(= (.getName %) nom) (file-seq (file root)))))
+
+(def game-state
+	(mem/memo
+	 (fn [t]
+		 (let [id (standardize-id (:id t))
+					 fl (find-file "../data/FinalStates" (str id ".csv"))
+					 csv (parse-csv (reader fl))
+					 values (map #(case %
+													"true" 100
+													"false" 0
+													(read-string %))
+											 (filter #(not= % "") (flatten (rest (map rest csv)))))]
+			 (int-array values)))))
+
+(defn state-distance [a b]
+	(Baseline/stateCosineDissimilarity (game-state a) (game-state b)))
+
+;(ngram-count 1 (first (:traces (first us-measure))))
+;(intent-count (first (:traces (first us-measure))))
+;(into [] (game-state (first (:traces (first us-measure)))))
 
 ;; overall
 
-;;; glz results
-(let [ad (analyze-dissimilarity-find-w distance :glz)
+;;; GLZ
+#_(let [ad (analyze-dissimilarity-find-w distance :glz)
 			w (:w ad)
 			ao (with-warp-window w (analyze-outlierness-find-k distance :glz))
 			k (:k ao)
@@ -195,13 +243,35 @@
 		:mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
 	 {:ad ad :ao ao :au au}])
 
-; NEXT:
-;;; n-gram results
-#_(let [ad (analyze-dissimilarity-find-n (fn [n a b _doms] (ngram-distance n a b)) :n-gram)
+;;; n-gram
+(let [ad (analyze-dissimilarity-find-n (fn [n a b _doms] (ngram-distance n a b)) :n-gram)
 			n (:n ad)
 			ao (analyze-outlierness-find-k (fn [a b _doms] (ngram-distance n a b)) :n-gram)
 			k (:k ao)
 			au (analyze-uniqueness k (fn [a b _doms] (ngram-distance n a b)) :n-gram)]
+	[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+		:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+		:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+		:mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+	 {:ad ad :ao ao :au au}])
+
+;;; intent cosine dissimilarity
+(let [ad (analyze-dissimilarity (fn [a b _doms] (intent-distance a b)) :intent)
+			n (:n ad)
+			ao (analyze-outlierness-find-k (fn [a b _doms] (intent-distance a b)) :intent)
+			k (:k ao)
+			au (analyze-uniqueness k (fn [a b _doms] (intent-distance a b)) :intent)]
+	[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+		:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+		:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+		:mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+	 {:ad ad :ao ao :au au}])
+;;; intent cosine dissimilarity
+(let [ad (analyze-dissimilarity (fn [a b _doms] (state-distance a b)) :state)
+			n (:n ad)
+			ao (analyze-outlierness-find-k (fn [a b _doms] (state-distance a b)) :state)
+			k (:k ao)
+			au (analyze-uniqueness k (fn [a b _doms] (state-distance a b)) :state)]
 	[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
 		:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
 		:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
