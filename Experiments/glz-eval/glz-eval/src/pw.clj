@@ -1,13 +1,14 @@
 (ns pw
-	(:require [clojure.java.io :refer [file reader]]
+	(:require [clojure.java.io :refer [file reader writer]]
 						[clojure.string :refer [split join]]
 						[clojure.math.numeric-tower :refer [abs ceil floor sqrt]]
 						[clojure.core.memoize :as mem]
 						[gamalyzer.cmp.tt.cced :refer [with-warp-window distance distances]]
-						[gamalyzer.data.input :refer [make-traces make-domains expand-domain**]]
-						[clojure-csv.core :refer [parse-csv]]
+						[gamalyzer.data.input :refer [make-traces make-domains expand-domain** make-trace]]
+						[clojure-csv.core :refer [parse-csv write-csv]]
+						[clojure.data :refer [diff]]
 						[k-medoid :refer [k-medoids]]
-						[error :refer [mean-error mean-abs-error ms-error rms-error]]
+						[error :refer [mean-error mean-abs-error ms-error rms-error sum]]
 						[pw-read :refer [dissimilarity uniqueness outlierness]])
 	(:import [edu.ucsc.eis Baseline])
 	)
@@ -23,6 +24,115 @@
 (defn do-trials [tfn trials]
 	(doall (map tfn trials)))
 
+;; measures
+
+
+(defn alter-trace [alter-input t]
+	(assoc t :inputs (mapv alter-input (:inputs t))))
+
+(defn alter-traces [alter-input in-traces]
+	(let [new-traces (mapv #(alter-trace alter-input %) (:traces in-traces))
+				new-domains (expand-domain** new-traces (make-domains))]
+		(make-traces new-traces new-domains)))
+
+(defn alternate-d-measure [alter-input]
+	(doall (map (fn [d]
+								(let [rid (:reference d)
+											traces (alter-traces alter-input (:traces d))
+											r (get-trace rid traces)
+											ratings (doall (map (fn [[tid rating]] [(get-trace tid traces) rating])
+																					(:ratings d)))]
+									{:trial (:trial d)
+									 :reference r :ratings ratings :domains (:domains traces)
+									 :longest-trace-length (apply max (doall (map #(count (:inputs %)) (conj (map first ratings) r))))}))
+							(dissimilarity))))
+
+(defn alternate-os-measure [alter-input]
+	(doall (map (fn [o]
+				 (let [traces (alter-traces alter-input (:traces o))
+							 ratings (into {} (doall (map (fn [[tid rating]] [(get-trace tid traces) rating])
+																						(:ratings o))))]
+					 {:trial (:trial o)
+						:ratings ratings :domains (:domains traces)
+						:longest-trace-length (apply max (doall (map #(count (:inputs %)) (map first ratings))))}))
+			 (outlierness))))
+
+(defn alternate-us-measure [alter-input]
+	(doall (map (fn [o]
+				 (let [traces (alter-traces alter-input (:traces o))]
+					 {:trial (:trial o)
+						:rating (:rating o) :domains (:domains traces)
+						:traces (:traces traces)
+						:longest-trace-length (apply max (doall (map #(count (:inputs %)) (:traces traces))))}))
+			 (uniqueness))))
+
+(def d-measure-regular (alternate-d-measure identity))
+(def os-measure-regular (alternate-os-measure identity))
+(def us-measure-regular (alternate-us-measure identity))
+
+;; alternate gamalyzer encodings
+
+(defn intent-majorize-input [i]
+	(if-let [[Proc Selection Choice] (:det i)]
+		(if (= Choice :socialize)
+			(let [[[Initiator [Intent Game _Realization]] Target _Player] (:vals i)
+						out
+						(assoc i
+							:det (list Proc Selection Intent)
+							:vals (list [Initiator Target Game]))]
+				out)
+			i)
+		i))
+
+(def d-measure-intent-major (alternate-d-measure intent-majorize-input))
+(def os-measure-intent-major (alternate-os-measure intent-majorize-input))
+(def us-measure-intent-major (alternate-us-measure intent-majorize-input))
+
+(defn game-majorize-input [i]
+	(if-let [[Proc Selection Choice] (:det i)]
+		(if (= Choice :socialize)
+			(let [[[Initiator [Intent Game _Realization]] Target _Player] (:vals i)
+						out
+						(assoc i
+							:det (list Proc Selection Game)
+							:vals (list [Initiator Target Intent]))]
+				out)
+			i)
+		i))
+
+(def d-measure-game-major (alternate-d-measure game-majorize-input))
+(def os-measure-game-major (alternate-os-measure game-majorize-input))
+(def us-measure-game-major (alternate-us-measure game-majorize-input))
+
+(defn i>g>t-input [i]
+	(if-let [[Proc Selection Choice] (:det i)]
+		(if (= Choice :socialize)
+			(let [[[Initiator [Intent Game _Realization]] Target _Player] (:vals i)
+						]
+				(assoc i
+					:vals (list Initiator (list Intent Game) Target)))
+			i)
+		i))
+
+(def d-measure-i>g>t (alternate-d-measure i>g>t-input))
+(def os-measure-i>g>t (alternate-os-measure i>g>t-input))
+(def us-measure-i>g>t (alternate-us-measure i>g>t-input))
+
+(defn i=g=t-input [i]
+	(if-let [[Proc Selection Choice] (:det i)]
+		(if (= Choice :socialize)
+			(let [[[Initiator [Intent Game _Realization]] Target _Player] (:vals i)
+						]
+				(assoc i
+					:vals (list [Initiator (list Game Intent) Target])))
+			i)
+		i))
+
+
+(def d-measure-i=g=t (alternate-d-measure i=g=t-input))
+(def os-measure-i=g=t (alternate-os-measure i=g=t-input))
+(def us-measure-i=g=t (alternate-us-measure i=g=t-input))
+
 ;; dissimilarities
 
 (defn dissimilarities-trial [trial metfn metname]
@@ -37,18 +147,7 @@
 										 :ref (standardize-id (:id r)) :trace (standardize-id (:id trace))}))
 								traces-and-ratings))))
 
-(defonce d-measure (map (fn [d]
-												 (let [rid (:reference d)
-															 traces (:traces d)
-															 r (get-trace rid traces)
-															 ratings (map (fn [[tid rating]] [(get-trace tid traces) rating])
-																						(:ratings d))]
-													 {:trial (:trial d)
-														:reference r :ratings ratings :domains (:domains traces)
-														:longest-trace-length (apply max (map #(count (:inputs %)) (conj (map first ratings) r)))}))
-												(dissimilarity)))
-
-(defn analyze-dissimilarity [metfn metname]
+(defn analyze-dissimilarity [d-measure metfn metname]
 	(let [trials (doall (do-trials #(dissimilarities-trial % metfn metname) d-measure))
 				rms-err (rms-error trials)]
 		(println "err" rms-err)
@@ -59,22 +158,22 @@
 		 :mean-abs-err (mean-abs-error trials)
 		 :trials trials}))
 
-(defn analyze-dissimilarity-find-w [metfn metname]
+(defn analyze-dissimilarity-find-w [d-measure metfn metname]
 	(let [longest-trace-length (apply max (map :longest-trace-length d-measure))
 				ws (doall
 						(map (fn [w]
 									 (println "dissimilarity try w =" w)
-									 (assoc (with-warp-window w (analyze-dissimilarity metfn metname)) :w w))
-								 (range 1 (inc longest-trace-length))))]
+									 (assoc (with-warp-window w (analyze-dissimilarity d-measure metfn metname)) :w w))
+								 (range 1 longest-trace-length)))]
 		(println "done with parameter exploration")
 		(apply min-key :rms-err ws)))
 
 ;; n-gram-specific hack for parameter search
-(defn analyze-dissimilarity-find-n [metfn metname]
+(defn analyze-dissimilarity-find-n [d-measure metfn metname]
 	(let [ns (doall
 						(map (fn [n]
 									 (println "dissimilarity try n =" n)
-									 (assoc (analyze-dissimilarity (partial metfn n) metname) :n n))
+									 (assoc (analyze-dissimilarity d-measure (partial metfn n) metname) :n n))
 								 (range 1 10)))]
 		(println "done with parameter exploration")
 		(apply min-key :rms-err ns)))
@@ -100,16 +199,7 @@
 																	 samples))))
 									 (:clusters clustering)))))
 
-(defonce os-measure (map (fn [o]
-													 (let [traces (:traces o)
-																 ratings (into {} (map (fn [[tid rating]] [(get-trace tid traces) rating])
-																											 (:ratings o)))]
-														 {:trial (:trial o)
-															:ratings ratings :domains (:domains traces)
-															:longest-trace-length (apply max (map #(count (:inputs %)) (map first ratings)))}))
-												 (outlierness)))
-
-(defn analyze-outlierness [k metfn metname]
+(defn analyze-outlierness [os-measure k metfn metname]
 	(let [trials (do-trials #(outlierness-trial % k metfn metname) os-measure)
 				rms-err (rms-error trials)]
 		(println "err" rms-err)
@@ -121,12 +211,12 @@
 		 :mean-abs-err (mean-abs-error trials)
 		 :trials trials}))
 
-(defn analyze-outlierness-find-k [metfn metname]
+(defn analyze-outlierness-find-k [os-measure metfn metname]
 	(let [largest-trace-count (apply max (map #(count (:ratings %)) os-measure))
 				param-sets
 				(doall (map (fn [k]
 											(println "outlierness try k =" k)
-											(analyze-outlierness k metfn metname))
+											(analyze-outlierness os-measure k metfn metname))
 										(range 1 (max 3 (int (/ largest-trace-count 5))))))]
 		(println "done with parameter exploration")
 		(apply min-key :rms-err param-sets)))
@@ -149,15 +239,7 @@
 		 :traces (map #(standardize-id (:id %)) traces)
 		 :medoids (map #(:id (:medoid %)) (:clusters clustering))}))
 
-(defonce us-measure (map (fn [o]
-													 (let [traces (:traces o)]
-														 {:trial (:trial o)
-															:rating (:rating o) :domains (:domains traces)
-															:traces (:traces traces)
-															:longest-trace-length (apply max (map #(count (:inputs %)) (:traces traces)))}))
-												 (uniqueness)))
-
-(defn analyze-uniqueness [k metfn metname]
+(defn analyze-uniqueness [us-measure k metfn metname]
 	(let [trials (do-trials #(uniqueness-trial % k metfn metname) us-measure)
 				rms-err (rms-error trials)]
 		{:k k
@@ -168,19 +250,24 @@
 		 :mean-abs-err (mean-abs-error trials)
 		 :trials trials}))
 
-(defn analyze-uniqueness-find-k [metfn metname]
+(defn analyze-uniqueness-find-k [us-measure metfn metname]
 	(let [longest-trace-length (apply max (map :longest-trace-length us-measure))
 				largest-trace-count (apply max (map #(count (:traces %)) us-measure))
 				param-sets
 				(doall (mapcat (fn [k]
 												 (println "uniqueness try k =" k)
-												 (analyze-uniqueness k metfn metname))
+												 (analyze-uniqueness us-measure k metfn metname))
 											 (range 1 (max 3 (int (/ largest-trace-count 5))))))]
 		(println "done with parameter exploration")
 		(apply min-key :rms-err param-sets)))
 
-(defn game-names [trace] (map #(str (second (second (first (:vals %)))))
-															(:inputs trace)))
+;; baseline support. Only use with non-altered trace sets.
+
+(defn just-action-names [name-type trace]
+	(map #(str (case name-type
+							 :game (second (second (first (:vals %))))
+							 :intent (first (second (first (:vals %))))))
+			 (:inputs trace)))
 
 (defn int-frequencies [l]
 	(into {} (map (fn [[k v]] [k (int v)])
@@ -188,23 +275,33 @@
 
 (def ngram-count
 	(mem/memo
-	 (fn [n t] (int-frequencies (map #(join "__" %)
-																	 (partition n 1 (game-names t)))))))
+	 (fn [name-type n t]
+		 (int-frequencies (map #(join "__" %)
+													 (partition n 1 (just-action-names name-type t)))))))
 
-(defn ngram-distance [n a b] (Baseline/ngramDistance (ngram-count n a) (ngram-count n b)))
+(defn ngram-distance [name-type n a b]
+	(Baseline/ngramDistance (ngram-count name-type n a)
+													(ngram-count name-type n b)))
 
-(defn intent-names [trace] (map #(str
-																	(first (first (:vals %))) "_"
-																	(second (second (first (:vals %)))) "_"
-																	(second (:vals %)))
-																(:inputs trace)))
+(defn action-names [name-type trace]
+	(map #(str
+				 (first (first (:vals %))) "_"
+				 (case name-type
+					 :intent (first (second (first (:vals %))))
+					 :game (second (second (first (:vals %))))) "_"
+				 (second (:vals %)))
+			 (:inputs trace)))
 
-(def intent-count
+(def action-count
 	(mem/memo
-	 (fn [t] (int-frequencies (intent-names t)))))
+	 (fn [name-type t] (int-frequencies (action-names name-type t)))))
 
-(defn intent-distance [a b]
-	(Baseline/intentCosineDissimilarity (intent-count a) (intent-count b)))
+(defn action-distance [name-type metr a b]
+	(case metr
+		:angular
+		(Baseline/intentCosineDissimilarity (action-count name-type a) (action-count name-type b))
+		:manhattan
+		(Baseline/ngramDistance (action-count name-type a) (action-count name-type b))))
 
 (defn find-file [root nom]
 	(first (filter #(= (.getName %) nom) (file-seq (file root)))))
@@ -213,67 +310,193 @@
 	(mem/memo
 	 (fn [t]
 		 (let [id (standardize-id (:id t))
-					 fl (find-file "../data/FinalStates" (str id ".csv"))
-					 csv (parse-csv (reader fl))
-					 values (map #(case %
-													"true" 100
-													"false" 0
-													(read-string %))
-											 (filter #(not= % "") (flatten (rest (map rest csv)))))]
-			 (int-array values)))))
+					 fl (find-file "../data/FinalStates" (str id ".csv"))]
+			 (with-open [r (reader fl)]
+					 (let [csv (parse-csv (reader fl))
+								 values (map #(case %
+																"true" 100
+																"false" 0
+																(read-string %))
+														 (filter #(not= % "") (flatten (rest (map rest csv)))))]
+						 (int-array values)))))))
 
-(defn state-distance [a b]
-	(Baseline/stateCosineDissimilarity (game-state a) (game-state b)))
+(defn square [a] (* a a))
+
+(defn state-distance [metr a b]
+	(case metr
+		:angular
+		(Baseline/stateCosineDissimilarity (game-state a) (game-state b))
+		:manhattan
+		(let [sa (game-state a)
+					sb (game-state b)
+					deltas (map (fn [ai bi] (abs (- ai bi))) sa sb)
+					maximum (* 100 (count sa))]
+			(/ (sum deltas) maximum))
+		:euclidean
+		(let [sa (game-state a)
+					sb (game-state b)
+					squares (map (fn [ai bi] (square (- ai bi))) sa sb)
+					maximum (sqrt (* (count sa) (square 100)))]
+			(/ (sqrt (sum squares)) maximum))
+		))
 
 ;(ngram-count 1 (first (:traces (first us-measure))))
 ;(intent-count (first (:traces (first us-measure))))
 ;(into [] (game-state (first (:traces (first us-measure)))))
 
-;; overall
+;; analysis
 
-;;; GLZ
-#_(let [ad (analyze-dissimilarity-find-w distance :glz)
-			w (:w ad)
-			ao (with-warp-window w (analyze-outlierness-find-k distance :glz))
-			k (:k ao)
-			au (with-warp-window w (analyze-uniqueness k distance :glz))]
-	[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
-		:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
-		:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
-		:mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
-	 {:ad ad :ao ao :au au}])
+(defn analyze-glz [d-m o-m u-m]
+	(doall
+		(let [ad (analyze-dissimilarity-find-w d-m distance :glz)
+					w (:w ad)
+					ao (with-warp-window w (analyze-outlierness-find-k o-m distance :glz))
+					k (:k ao)
+					au (with-warp-window w (analyze-uniqueness u-m k distance :glz))]
+			[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+				:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+				:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+				:mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			 {:w w :k k}
+			 {:ad ad :ao ao :au au}])))
 
-;;; n-gram
-(let [ad (analyze-dissimilarity-find-n (fn [n a b _doms] (ngram-distance n a b)) :n-gram)
-			n (:n ad)
-			ao (analyze-outlierness-find-k (fn [a b _doms] (ngram-distance n a b)) :n-gram)
-			k (:k ao)
-			au (analyze-uniqueness k (fn [a b _doms] (ngram-distance n a b)) :n-gram)]
-	[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
-		:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
-		:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
-		:mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
-	 {:ad ad :ao ao :au au}])
+(def all-results
+	{
+	 ;regular means i=g>t
+	 :glz-i=g>t (analyze-glz d-measure-regular os-measure-regular us-measure-regular)
+	 :glz-i>g>t (analyze-glz d-measure-i>g>t os-measure-i>g>t us-measure-i>g>t)
+	 :glz-i=g=t (analyze-glz d-measure-i=g=t os-measure-i=g=t us-measure-i=g=t)
+	 :glz-game-major (analyze-glz d-measure-game-major os-measure-game-major us-measure-game-major)
+	 :glz-intent-major (analyze-glz d-measure-intent-major os-measure-intent-major us-measure-intent-major)
 
-;;; intent cosine dissimilarity
-(let [ad (analyze-dissimilarity (fn [a b _doms] (intent-distance a b)) :intent)
-			n (:n ad)
-			ao (analyze-outlierness-find-k (fn [a b _doms] (intent-distance a b)) :intent)
-			k (:k ao)
-			au (analyze-uniqueness k (fn [a b _doms] (intent-distance a b)) :intent)]
-	[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
-		:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
-		:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
-		:mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
-	 {:ad ad :ao ao :au au}])
-;;; intent cosine dissimilarity
-(let [ad (analyze-dissimilarity (fn [a b _doms] (state-distance a b)) :state)
-			n (:n ad)
-			ao (analyze-outlierness-find-k (fn [a b _doms] (state-distance a b)) :state)
-			k (:k ao)
-			au (analyze-uniqueness k (fn [a b _doms] (state-distance a b)) :state)]
-	[{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
-		:ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
-		:mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
-		:mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
-	 {:ad ad :ao ao :au au}])
+	 ;;; n-gram-game
+	 :n-gram-game
+	 (let [ad (analyze-dissimilarity-find-n d-measure-regular (fn [n a b _doms] (ngram-distance :game n a b)) :n-gram)
+				 n (:n ad)
+				 ao (analyze-outlierness-find-k os-measure-regular (fn [a b _doms] (ngram-distance :game n a b)) :n-gram)
+				 k (:k ao)
+				 au (analyze-uniqueness us-measure-regular k (fn [a b _doms] (ngram-distance :game n a b)) :n-gram)]
+		 [{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+			 :ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+			 :mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+			 :mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			{:n n :k k}
+			{:ad ad :ao ao :au au}])
+
+	 ;;; n-gram-intent
+	 :n-gram-intent
+	 (let [ad (analyze-dissimilarity-find-n d-measure-regular (fn [n a b _doms] (ngram-distance :intent n a b)) :n-gram)
+				 n (:n ad)
+				 ao (analyze-outlierness-find-k os-measure-regular (fn [a b _doms] (ngram-distance :intent n a b)) :n-gram)
+				 k (:k ao)
+				 au (analyze-uniqueness us-measure-regular k (fn [a b _doms] (ngram-distance :intent n a b)) :n-gram)]
+		 [{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+			 :ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+			 :mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+			 :mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			{:n n :k k}
+			{:ad ad :ao ao :au au}])
+
+	 :action-intent-angular
+	 (let [ad (analyze-dissimilarity d-measure-regular (fn [a b _doms] (action-distance :intent :angular a b)) :intent)
+				 ao (analyze-outlierness-find-k os-measure-regular (fn [a b _doms] (action-distance :intent :angular a b)) :intent)
+				 k (:k ao)
+				 au (analyze-uniqueness us-measure-regular k (fn [a b _doms] (action-distance :intent :angular a b)) :intent)]
+		 [{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+			 :ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+			 :mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+			 :mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			{:k k}
+			{:ad ad :ao ao :au au}])
+
+	 :action-game-angular
+	 (let [ad (analyze-dissimilarity d-measure-regular (fn [a b _doms] (action-distance :game :angular a b)) :intent)
+				 ao (analyze-outlierness-find-k os-measure-regular (fn [a b _doms] (action-distance :game :angular a b)) :intent)
+				 k (:k ao)
+				 au (analyze-uniqueness us-measure-regular k (fn [a b _doms] (action-distance :game :angular a b)) :intent)]
+		 [{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+			 :ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+			 :mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+			 :mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			{:k k}
+			{:ad ad :ao ao :au au}])
+
+	 :action-intent-manhattan
+	 (let [ad (analyze-dissimilarity d-measure-regular (fn [a b _doms] (action-distance :intent :manhattan a b)) :intent)
+				 ao (analyze-outlierness-find-k os-measure-regular (fn [a b _doms] (action-distance :intent :manhattan a b)) :intent)
+				 k (:k ao)
+				 au (analyze-uniqueness us-measure-regular k (fn [a b _doms] (action-distance :intent :manhattan a b)) :intent)]
+		 [{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+			 :ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+			 :mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+			 :mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			{:k k}
+			{:ad ad :ao ao :au au}])
+
+	 :action-game-manhattan
+	 (let [ad (analyze-dissimilarity d-measure-regular (fn [a b _doms] (action-distance :game :manhattan a b)) :intent)
+				 ao (analyze-outlierness-find-k os-measure-regular (fn [a b _doms] (action-distance :game :manhattan a b)) :intent)
+				 k (:k ao)
+				 au (analyze-uniqueness us-measure-regular k (fn [a b _doms] (action-distance :game :manhattan a b)) :intent)]
+		 [{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+			 :ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+			 :mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+			 :mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			{:k k}
+			{:ad ad :ao ao :au au}])
+
+	 :state-angular
+	 (let [ad (analyze-dissimilarity d-measure-regular (fn [a b _doms] (state-distance :angular a b)) :state)
+				 ao (analyze-outlierness-find-k os-measure-regular (fn [a b _doms] (state-distance :angular a b)) :state)
+				 k (:k ao)
+				 au (analyze-uniqueness us-measure-regular k (fn [a b _doms] (state-distance :angular a b)) :state)]
+		 [{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+			 :ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+			 :mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+			 :mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			{:k k}
+			{:ad ad :ao ao :au au}])
+
+	 :state-manhattan
+	 (let [ad (analyze-dissimilarity d-measure-regular (fn [a b _doms] (state-distance :manhattan a b)) :state)
+				 ao (analyze-outlierness-find-k os-measure-regular (fn [a b _doms] (state-distance :manhattan a b)) :state)
+				 k (:k ao)
+				 au (analyze-uniqueness us-measure-regular k (fn [a b _doms] (state-distance :manhattan a b)) :state)]
+		 [{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+			 :ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+			 :mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+			 :mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			{:k k}
+			{:ad ad :ao ao :au au}])
+
+	 :state-euclidean
+	 (let [ad (analyze-dissimilarity d-measure-regular (fn [a b _doms] (state-distance :euclidean a b)) :state)
+				 ao (analyze-outlierness-find-k os-measure-regular (fn [a b _doms] (state-distance :euclidean a b)) :state)
+				 k (:k ao)
+				 au (analyze-uniqueness us-measure-regular k (fn [a b _doms] (state-distance :euclidean a b)) :state)]
+		 [{:rms {:ad (:rms-err ad) :ao (:rms-err ao) :au (:rms-err au)}
+			 :ms {:ad (:ms-err ad) :ao (:ms-err ao) :au (:ms-err au)}
+			 :mean {:ad (:mean-err ad) :ao (:mean-err ao) :au (:mean-err au)}
+			 :mean-abs {:ad (:mean-abs-err ad) :ao (:mean-abs-err ao) :au (:mean-abs-err au)}}
+			{:k k}
+			{:ad ad :ao ao :au au}])
+	 })
+
+(let [concise-results (into {} (map (fn [[k [r p _ts]]] [k {:rms (:rms r) :mae (:mean-abs r) :params p}]) all-results))
+			csv (write-csv (concat
+											[["metric" "rms-diss" "rms-outlier" "rms-unique" "mae-diss" "mae-outlier" "mae-unique" "w" "n" "k"]]
+											(mapv (fn [[k v]]
+															(mapv str [k
+																				 (:ad (:rms v))
+																				 (:ao (:rms v))
+																				 (:au (:rms v))
+																				 (:ad (:mae v))
+																				 (:ao (:mae v))
+																				 (:au (:mae v))
+																				 (:w (:params v))
+																				 (:n (:params v))
+																				 (:k (:params v))
+																				 ]))
+														concise-results)))]
+	(with-open [w (writer "results.csv")]
+		(.write w csv)))

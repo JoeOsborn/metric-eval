@@ -9,7 +9,7 @@
 (defn- get-traces [p]
 	(edn/read-log-files [(str "../data/" p)] #{} nil))
 
-(defn dissimilarity []
+(def dissimilarity (memoize (fn []
 	(reduce (fn [acc trial]
 						(let [trial-name (first trial)
 									folder-name (trial-folder-name trial-name)
@@ -25,9 +25,9 @@
 													 :ratings (into {} (map (fn [[k v]] [k (/ (dec (read-string v)) 6.0)]) trace-ratings))
 													 :traces actual-traces}))))
 					[]
-					(rest (parse-csv (reader "../data/experiment1Data.csv")))))
+					(rest (parse-csv (reader "../data/experiment1Data.csv")))))))
 
-(defn uniqueness []
+(def uniqueness (memoize (fn []
 	(reduce (fn [acc trial]
 						(let [trial-name (first trial)
 									folder-name (trial-folder-name trial-name)
@@ -41,10 +41,10 @@
 													 :rating (/ (dec (read-string rating)) 6.0)
 													 :traces actual-traces}))))
 					[]
-					(rest (parse-csv (reader "../data/experiment2Data.csv")))))
+					(rest (parse-csv (reader "../data/experiment2Data.csv")))))))
 
 
-(defn outlierness []
+(def outlierness (memoize (fn []
 	(reduce (fn [acc trial]
 						(let [trial-name (first trial)
 									folder-name (trial-folder-name trial-name)
@@ -58,7 +58,7 @@
 													 :ratings (into {} (map (fn [[k v]] [k (/ (dec (read-string v)) 6.0)]) trace-ratings))
 													 :traces actual-traces}))))
 					[]
-					(rest (parse-csv (reader "../data/experiment3Data.csv")))))
+					(rest (parse-csv (reader "../data/experiment3Data.csv")))))))
 
 
 ; (dissimilarity-trials)
