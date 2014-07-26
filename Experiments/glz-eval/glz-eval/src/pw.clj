@@ -164,7 +164,7 @@
 						(map (fn [w]
 									 (println "dissimilarity try w =" w)
 									 (assoc (with-warp-window w (analyze-dissimilarity d-measure metfn metname)) :w w))
-								 (range 1 longest-trace-length)))]
+								 (range 1 (inc longest-trace-length))))]
 		(println "done with parameter exploration")
 		(apply min-key :rms-err ws)))
 
@@ -199,6 +199,28 @@
 																	 samples))))
 									 (:clusters clustering)))))
 
+#_(defn kth-neighbor-distances [k traces metfn]
+	(into {} (doall (map (fn [t1]
+												 ; get distances to every other trace
+												 ; sort descending
+												 ; pick #k
+												 (let [distances (doall (map (fn [t2] (metfn t1 t2)) traces))
+															 sorted-distances (reverse (sort distances))]
+													 [t1 (nth sorted-distances (dec k))]))
+											 traces))))
+
+#_(defn outlierness-trial [t k metfn metname]
+	(let [ratings (:ratings t)
+				traces (keys ratings)
+				domains (:domains t)
+				distances (kth-neighbor-distances k traces (fn [a b] (min 1 (metfn a b domains))))]
+		(doall (map (fn [[trace d]]
+										 (let [rating (get ratings trace)]
+											 {:metric metname
+												:prediction d :human rating :error (- d rating)
+												:trace (standardize-id (:id trace))}))
+								distances))))
+
 (defn analyze-outlierness [os-measure k metfn metname]
 	(let [trials (do-trials #(outlierness-trial % k metfn metname) os-measure)
 				rms-err (rms-error trials)]
@@ -217,7 +239,7 @@
 				(doall (map (fn [k]
 											(println "outlierness try k =" k)
 											(analyze-outlierness os-measure k metfn metname))
-										(range 1 (max 3 (int (/ largest-trace-count 5))))))]
+										(range 1 5)))]
 		(println "done with parameter exploration")
 		(apply min-key :rms-err param-sets)))
 
@@ -238,6 +260,19 @@
 		 :prediction d :human rating :error (- d rating)
 		 :traces (map #(standardize-id (:id %)) traces)
 		 :medoids (map #(:id (:medoid %)) (:clusters clustering))}))
+
+
+#_(defn uniqueness-trial [t k metfn metname]
+	(let [rating (:rating t)
+				traces (:traces t)
+				domains (:domains t)
+				distances (kth-neighbor-distances k traces (fn [a b] (min 1 (metfn a b domains))))
+				sum-distance (sum (map second distances))
+				sample-count (count traces)
+				d (/ sum-distance sample-count)]
+		{:metric metname
+		 :prediction d :human rating :error (- d rating)
+		 :traces (map #(standardize-id (:id %)) traces)}))
 
 (defn analyze-uniqueness [us-measure k metfn metname]
 	(let [trials (do-trials #(uniqueness-trial % k metfn metname) us-measure)
@@ -482,21 +517,31 @@
 			{:ad ad :ao ao :au au}])
 	 })
 
-(let [concise-results (into {} (map (fn [[k [r p _ts]]] [k {:rms (:rms r) :mae (:mean-abs r) :params p}]) all-results))
-			csv (write-csv (concat
-											[["metric" "rms-diss" "rms-outlier" "rms-unique" "mae-diss" "mae-outlier" "mae-unique" "w" "n" "k"]]
-											(mapv (fn [[k v]]
-															(mapv str [k
-																				 (:ad (:rms v))
-																				 (:ao (:rms v))
-																				 (:au (:rms v))
-																				 (:ad (:mae v))
-																				 (:ao (:mae v))
-																				 (:au (:mae v))
-																				 (:w (:params v))
-																				 (:n (:params v))
-																				 (:k (:params v))
-																				 ]))
-														concise-results)))]
-	(with-open [w (writer "results.csv")]
-		(.write w csv)))
+(:state-manhattan all-results)
+
+(defn write-results []
+	(let [concise-results (into {} (map (fn [[k [r p _ts]]]
+																				[k {:rms (:rms r) :mae (:mean-abs r) :me (:mean r) :params p}])
+																			all-results))
+				csv (write-csv (concat
+												[["metric" "rms-diss" "rms-outlier" "rms-unique" "mae-diss" "mae-outlier" "mae-unique" "me-diss" "me-outlier" "me-unique" "w" "n" "k"]]
+												(mapv (fn [[k v]]
+																(mapv str [k
+																					 (:ad (:rms v))
+																					 (:ao (:rms v))
+																					 (:au (:rms v))
+																					 (:ad (:mae v))
+																					 (:ao (:mae v))
+																					 (:au (:mae v))
+																					 (:ad (:me v))
+																					 (:ao (:me v))
+																					 (:au (:me v))
+																					 (:w (:params v))
+																					 (:n (:params v))
+																					 (:k (:params v))
+																					 ]))
+															concise-results)))]
+		(with-open [w (writer "results.csv")]
+			(.write w csv))))
+
+(write-results)
