@@ -10,7 +10,10 @@ The analysis code lives in `Experiments/glz-eval/glz-eval/`. The `java-src` fold
 
 To execute the analysis, it is currently necessary to have a working installation of [Leiningen](http://leiningen.org) and then run (from the `Experiments/glz-eval/glz-eval/` directory:
 
-    lein repl
+    bash$ lein compile
+    ;; Some output as dependencies are fetched and work is performed
+    bash$ lein repl
+    ;; Some output as a REPL is launched
     user=> (require 'pw)
     ;; Lots of diagnostic and progress output as the analysis is run (get a coffee!)
     nil
