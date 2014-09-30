@@ -517,7 +517,7 @@
 			{:ad ad :ao ao :au au}])
 	 })
 
-(:state-manhattan all-results)
+;(:state-manhattan all-results)
 
 (defn write-results []
 	(let [concise-results (into {} (map (fn [[k [r p _ts]]]
@@ -544,4 +544,4 @@
 		(with-open [w (writer "results.csv")]
 			(.write w csv))))
 
-(write-results)
+;(write-results)
