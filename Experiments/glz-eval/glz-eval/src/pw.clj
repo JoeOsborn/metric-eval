@@ -7,9 +7,9 @@
 						[gamalyzer.data.input :refer [make-traces make-domains expand-domain** make-trace]]
 						[clojure-csv.core :refer [parse-csv write-csv]]
 						[clojure.data :refer [diff]]
-						[k-medoid :refer [k-medoids]]
+						[k_medoid :refer [k-medoids]]
 						[error :refer [mean-error mean-abs-error ms-error rms-error sum]]
-						[pw-read :refer [dissimilarity uniqueness outlierness]])
+						[pw_read :refer [dissimilarity uniqueness outlierness]])
 	(:import [edu.ucsc.eis Baseline])
 	)
 

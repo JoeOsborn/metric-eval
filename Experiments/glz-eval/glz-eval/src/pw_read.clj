@@ -1,4 +1,4 @@
-(ns pw-read
+(ns pw_read
   (:require [clojure.java.io :refer [reader]]
 						[clojure-csv.core :refer [parse-csv]]
             [gamalyzer.read.edn :as edn]))

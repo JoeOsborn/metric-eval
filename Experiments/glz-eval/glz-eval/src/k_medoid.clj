@@ -1,4 +1,4 @@
-(ns k-medoid
+(ns k_medoid
 	(:require [clojure.math.numeric-tower :refer [abs ceil floor sqrt]]
 						[clojure.core.memoize :as mem]))
 
